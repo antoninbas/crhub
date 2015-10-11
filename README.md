@@ -23,6 +23,7 @@ crhub:
  * sinatra
  * json
  * octokit
+ * sqlite3
 
 You also need to obtain a GitHub [personal token]
 (https://github.com/settings/tokens) with sufficient permissions. Copy this
