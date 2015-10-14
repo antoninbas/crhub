@@ -58,7 +58,6 @@ $repos = env_repos
 $repos.each do |repo|
   RepoState = {}
   RepoState[:sema] = Mutex.new
-  RepoState[:skip] = Set.new
   RepoState[:busy] = Set.new
   $GlobalState[repo] = RepoState
 end
@@ -71,61 +70,97 @@ end
 @client = Octokit::Client.new(:access_token => ACCESS_TOKEN)
 @db = SQLite3::Database.new db_name
 
-# List tables for drop
-drop_script = @db.execute <<-SQL
-select 'drop table ' || name || ';' from sqlite_master where type = 'table';
-SQL
+# # List tables for drop
+# drop_script = @db.execute <<-SQL
+# select 'drop table ' || name || ';' from sqlite_master where type = 'table';
+# SQL
 
-# Drop all tables
-drop_script.each do |drop_one|
-  drop_one = drop_one.join(" ")
-  @db.execute(drop_one)
-end
+# # Drop all tables
+# drop_script.each do |drop_one|
+#   drop_one = drop_one.join(" ")
+#   @db.execute(drop_one)
+# end
 
 def sanitize_repo_name(repo)
   return repo.sub('/', '---').gsub("-", "_")
 end
 
-# Create tables (one per repo)
+# Create tables
 $repos.each do |repo|
   repo = sanitize_repo_name(repo)
-  s = "create table #{repo} (
-         id integer primary key,
-         number int,
+  s = "create table if not exists #{repo} (
+         number integer primary key,
+         id int unique,
          title text,
          user_id int,
          user_login text,
          assignee_id int,
          assignee_login text,
+         sha text unique
+       )"
+  rows = @db.execute(s)
+  s = "create table if not exists #{repo}__reviews_ (
+         number int,
+         user_id int,
          score int
        )"
   rows = @db.execute(s)
+  s = "create unique index if not exists #{repo}__reviews_idx_
+       on #{repo}__reviews_ (number, user_id)"
+  rows = @db.execute(s)
 end
 
-def db_update_pr(repo, id, number, title, user_id, user_login,
-                 assignee_id, assignee_login, score)
+def db_update_pr(repo, number, id, title, user_id, user_login,
+                 assignee_id, assignee_login, sha)
   repo = sanitize_repo_name(repo)
-  query = "select * from #{repo} where id = ?"
-  rows = @db.execute(query, id)
+  query = "select * from #{repo} where number = ?"
+  rows = @db.execute(query, number)
   if rows.length == 0
-    query = "insert into #{repo} (id, number, title, user_id, user_login, assignee_id, assignee_login, score)
+    query = "insert into #{repo} (number, id, title, user_id, user_login, assignee_id, assignee_login, sha)
              values (?, ?, ?, ?, ?, ?, ?, ?)"
-    @db.execute(query, [id, number, title, user_id, user_login, assignee_id, assignee_login, score])
+    @db.execute(query, [number, id, title, user_id, user_login, assignee_id, assignee_login, sha])
     return true
   end
   raise "Corrupted DB" unless rows.length == 1
   row = rows[0]
-  raise "Corrupted DB" unless row[1] == number
+  raise "Corrupted DB" unless row[1] == id
   raise "Corrupted DB" unless row[2] == title
   raise "Corrupted DB" unless row[3] == user_id
   raise "Corrupted DB" unless row[4] == user_login
-  if row[5] != assignee_id or row[7] != score
-    query = "replace into #{repo} (id, number, title, user_id, user_login, assignee_id, assignee_login, score)
+  if row[5] != assignee_id
+    query = "replace into #{repo} (number, id, title, user_id, user_login, assignee_id, assignee_login, sha)
              values (?, ?, ?, ?, ?, ?, ?, ?)"
-    @db.execute(query, [id, number, title, user_id, user_login, assignee_id, assignee_login, score])
+    @db.execute(query, [number, id, title, user_id, user_login, assignee_id, assignee_login, sha])
     return true
   end
   return false
+end
+
+def db_add_review(repo, number, user_id, score)
+  repo = sanitize_repo_name(repo)
+  query = "insert or replace into #{repo}__reviews_ (number, user_id, score)
+           values (?, ?, ?)"
+  @db.execute(query, [number, user_id, score])
+end
+
+def db_get_status(repo, number)
+  repo = sanitize_repo_name(repo)
+  repo_reviews = "#{repo}__reviews_"
+  query = "select score from #{repo}, #{repo_reviews}
+           where #{repo}.number = #{repo_reviews}.number and #{repo}.assignee_id = #{repo_reviews}.user_id"
+  rows = @db.execute(query)
+  if rows.length == 0
+    return 0
+  end
+  return rows[0][0]
+end
+
+def db_get_sha(repo, number)
+  repo = sanitize_repo_name(repo)
+  query = "select sha from #{repo} where number = ?"
+  rows = @db.execute(query, number)
+  raise "Corrupted DB (no sha)" unless rows.length == 1
+  return rows[0][0]
 end
 
 def db_show_prs(repo)
@@ -136,126 +171,87 @@ def db_show_prs(repo)
   end
 end
 
-def get_score(repo, issue_number, assignee_id) # issue number is PR number
-  comments = @client.issue_comments(repo, issue_number)
-  score = 0
-  comments.each do |c|
-    if assignee_id != c['user']['id']
-      next
-    end
-    case c['body']
-    when "+1"
-      score = 1
-    when "-1"
-      score = -1
-    end
+def get_score(comment_body)
+  score = nil
+  case comment_body
+  when "+1"
+    score = 1
+  when "-1"
+    score = -1
   end
   return score
 end
 
-def set_pr_status(pr, status)
+def set_pr_status(repo, sha, status)
   options = {}
   options[:context] = "crhub"
   options[:description] = "checks code review status"
-  @client.create_status(pr['base']['repo']['full_name'], pr['head']['sha'], status, options)
+  @client.create_status(repo, sha, status, options)
 end
 
-def process_pr(pr, force_status)
-  repo = pr['base']['repo']['full_name']
-  entry = [pr['id'], pr['number'], pr['title'],
-           pr['user']['id'], pr['user']['login']]
-  score = 0
-  if pr['assignee']
-    entry += [pr['assignee']['id'], pr['assignee']['login']]
-    score = get_score(repo, pr['number'], pr['assignee']['id'])
+def repo_name_from_pr(pr)
+  return pr['base']['repo']['full_name']
+end
+
+def push_status(repo, number, sha)
+  score = db_get_status(repo, number)
+  if score > 0
+    set_pr_status(repo, sha, "success")
   else
-    # no assignee yet
-    entry += [nil, nil]
-  end
-  entry += [score]
-  # puts entry.join(", ")
-  changed = db_update_pr(repo, *entry)
-  if force_status
-    changed = true
-  end
-  if changed and score > 0
-    set_pr_status(pr, "success")
-  elsif changed
-    set_pr_status(pr, "failure")
+    set_pr_status(repo, sha, "failure")
   end
 end
 
-def request_access(repo, pr_id)
+def request_access(repo, pr_number)
   repo_state = $GlobalState[repo]
   repo_state[:sema].lock()
-  while repo_state[:busy].include?(pr_id)
+  while repo_state[:busy].include?(pr_number)
     repo_state[:sema].unlock()
     sleep(0)
     repo_state[:sema].lock()
   end
-  repo_state[:busy].add(pr_id)
+  repo_state[:busy].add(pr_number)
   repo_state[:sema].unlock()
 end
 
-def release_access(repo, pr_id)
+def release_access(repo, pr_number)
   repo_state = $GlobalState[repo]
   repo_state[:sema].synchronize {
-    repo_state[:busy].delete(pr_id)
+    repo_state[:busy].delete(pr_number)
   }
 end
 
-def process_pr_webhook(pr)
-  repo = pr['base']['repo']['full_name']
-  request_access(repo, pr['id'])
-  repo_state = $GlobalState[repo]
-  repo_state[:sema].synchronize {
-    repo_state[:skip].add(pr['id'])
-  }
-  set_pr_status(pr, "pending")
-  process_pr(pr, true)
-  release_access(repo, pr['id'])
-end
-
-def process_issue_comment_webhook(repo, issue, comment)
-  pr = @client.pull_request(repo, issue['number'])
-  # I do not leverage the comment at all to make things simpler
-  request_access(repo, pr['id'])
-  repo_state = $GlobalState[repo]
-  repo_state[:sema].synchronize {
-    repo_state[:skip].add(pr['id'])
-  }
-  set_pr_status(pr, "pending")
-  process_pr(pr, true)
-  release_access(repo, pr['id'])
-end
-
-def update_all_prs()
-  $repos.each do |repo|
-    puts "Pulling PRs in #{repo}"
-    repo_state = $GlobalState[repo]
-    repo_state[:sema].synchronize {
-      repo_state[:skip].clear()
-    }
-    opened_PRs = @client.pull_requests(repo, :state => 'opened')
-    opened_PRs.each do |pr|
-      request_access(repo, pr['id'])
-      repo_state[:sema].synchronize {
-        if repo_state[:skip].include?(pr['id'])
-          next
-        end
-        process_pr(pr, false)
-      }
-      release_access(repo, pr['id'])
-    end
+def process_pr(pr)
+  repo = repo_name_from_pr(pr)
+  set_pr_status(repo, pr['head']['sha'], "pending")
+  entry = [pr['number'], pr['id'], pr['title'],
+           pr['user']['id'], pr['user']['login']]
+  score = 0
+  if pr['assignee']
+    entry += [pr['assignee']['id'], pr['assignee']['login']]
+  else
+    # no assignee yet
+    entry += [nil, nil]
   end
+  entry += [pr['head']['sha']]
+  # puts entry.join(", ")
+  request_access(repo, pr['number'])
+  changed = db_update_pr(repo, *entry)
+  push_status(repo, pr['number'], pr['head']['sha'])
+  release_access(repo, pr['number'])
 end
 
-thr = Thread.new do
-  loop do
-    puts "Periodical PR update"
-    update_all_prs()
-    sleep(60)
+def process_pr_comment(repo, issue, comment)
+  # necessary?
+  request_access(repo, issue['number'])
+  sha = db_get_sha(repo, issue['number'])
+  set_pr_status(repo, sha, "pending")
+  score = get_score(comment['body'])
+  if score
+    db_add_review(repo, issue['number'], comment["user"]["id"], score)
+    push_status(repo, issue['number'], sha)
   end
+  release_access(repo, issue['number'])
 end
 
 post '/codereview' do
@@ -267,8 +263,14 @@ post '/codereview' do
     case action
     when "opened"
       process_pull_request_opened(@payload["pull_request"])
+    when "closed"
+      process_pull_request_closed(@payload["pull_request"])
     when "labeled"
-      process_pull_request_labeled(@payload["pull_request"])
+      process_pull_request_labeled(@payload["pull_request"],
+                                   @payload["label"])
+    when "unlabeled"
+      process_pull_request_unlabeled(@payload["pull_request"],
+                                     @payload["label"])
     when "assigned"
       process_pull_request_assigned(@payload["pull_request"])
     when "unassigned"
@@ -289,22 +291,27 @@ end
 helpers do
   def process_pull_request_opened(pull_request)
     puts "Opened PR #{pull_request['title']}"
-    process_pr_webhook(pull_request)
+    process_pr(pull_request)
   end
 
-  def process_pull_request_labeled(pull_request)
-    puts "Labeled PR #{pull_request['title']}"
+  def process_pull_request_labeled(pull_request, label)
+    puts "Labeled PR #{pull_request['title']} with #{label['name']}"
+    # do nothing for now
+  end
+
+  def process_pull_request_unlabeled(pull_request, label)
+    puts "Unlabeled PR #{pull_request['title']}: removed #{label['name']}"
     # do nothing for now
   end
 
   def process_pull_request_assigned(pull_request)
     puts "Assigned PR #{pull_request['title']}"
-    process_pr_webhook(pull_request)
+    process_pr(pull_request)
   end
 
   def process_pull_request_unassigned(pull_request)
     puts "Unassigned PR #{pull_request['title']}"
-    process_pr_webhook(pull_request)
+    process_pr(pull_request)
   end
 
   def process_status()
@@ -323,7 +330,7 @@ helpers do
       return
     end
     puts "Issue is a pull request"
-    process_issue_comment_webhook(repo, issue, comment)
+    process_pr_comment(repo, issue, comment)
   end
 
   def process_pull_request_review_comment()
