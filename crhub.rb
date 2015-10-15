@@ -40,18 +40,25 @@ db_name = "test.db"
 
 # This is temporary. Sinatra comes with its own CL options parser.
 # So I am using an env variable.
-env_repos = ENV["repos"]
 if not ENV.include?("repos")
   puts "You need to define the 'repos' env variable"
   puts "Usage: repos=\"antoninbas/repo1 antoninbas/repo2\""
   exit(1)
 end
+env_repos = ENV["repos"]
 env_repos = env_repos.split()
 if env_repos.length == 0
   puts "'repos' environment variable empty"
   puts "Usage: repos=\"antoninbas/repo1 antoninbas/repo2\""
   exit(1)
 end
+
+env_users_bypass = []
+if ENV.include?("users_bypass")
+  env_users_bypass = ENV["users_bypass"].split()
+end
+
+$users_bypass = env_users_bypass.to_set
 
 $repos = env_repos
 
@@ -167,6 +174,17 @@ def db_get_branch(repo, number)
   return rows[0][0]
 end
 
+def db_get_easy(repo, number, attr)
+  repo = sanitize_repo_name(repo)
+  query = "select #{attr} from #{repo}
+           where #{repo}.number = ?"
+  rows = @db.execute(query, number)
+  if rows.length == 0
+    return nil
+  end
+  return rows[0][0]
+end
+
 def db_get_sha(repo, number)
   repo = sanitize_repo_name(repo)
   query = "select sha from #{repo} where number = ?"
@@ -210,6 +228,11 @@ def repo_name_from_pr(pr)
 end
 
 def push_status(repo, number, sha)
+  user_login = db_get_easy(repo, number, 'user_login')
+  if $users_bypass.include?(user_login)
+    set_pr_status(repo, number, sha, "success")
+    return
+  end
   score = db_get_status(repo, number)
   if score > 0
     set_pr_status(repo, number, sha, "success")
