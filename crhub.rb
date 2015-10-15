@@ -96,7 +96,8 @@ $repos.each do |repo|
          user_login text,
          assignee_id int,
          assignee_login text,
-         sha text unique
+         sha text unique,
+         target_branch text
        )"
   rows = @db.execute(s)
   s = "create table if not exists #{repo}__reviews_ (
@@ -111,14 +112,14 @@ $repos.each do |repo|
 end
 
 def db_update_pr(repo, number, id, title, user_id, user_login,
-                 assignee_id, assignee_login, sha)
+                 assignee_id, assignee_login, sha, target_branch)
   repo = sanitize_repo_name(repo)
   query = "select * from #{repo} where number = ?"
   rows = @db.execute(query, number)
   if rows.length == 0
-    query = "insert into #{repo} (number, id, title, user_id, user_login, assignee_id, assignee_login, sha)
-             values (?, ?, ?, ?, ?, ?, ?, ?)"
-    @db.execute(query, [number, id, title, user_id, user_login, assignee_id, assignee_login, sha])
+    query = "insert into #{repo} (number, id, title, user_id, user_login, assignee_id, assignee_login, sha, target_branch)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    @db.execute(query, [number, id, title, user_id, user_login, assignee_id, assignee_login, sha, target_branch])
     return true
   end
   raise "Corrupted DB" unless rows.length == 1
@@ -128,9 +129,9 @@ def db_update_pr(repo, number, id, title, user_id, user_login,
   raise "Corrupted DB" unless row[3] == user_id
   raise "Corrupted DB" unless row[4] == user_login
   if row[5] != assignee_id
-    query = "replace into #{repo} (number, id, title, user_id, user_login, assignee_id, assignee_login, sha)
-             values (?, ?, ?, ?, ?, ?, ?, ?)"
-    @db.execute(query, [number, id, title, user_id, user_login, assignee_id, assignee_login, sha])
+    query = "replace into #{repo} (number, id, title, user_id, user_login, assignee_id, assignee_login, sha, target_branch)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    @db.execute(query, [number, id, title, user_id, user_login, assignee_id, assignee_login, sha, target_branch])
     return true
   end
   return false
@@ -151,6 +152,17 @@ def db_get_status(repo, number)
   rows = @db.execute(query)
   if rows.length == 0
     return 0
+  end
+  return rows[0][0]
+end
+
+def db_get_branch(repo, number)
+  repo = sanitize_repo_name(repo)
+  query = "select target_branch from #{repo}
+           where #{repo}.number = ?"
+  rows = @db.execute(query, number)
+  if rows.length == 0
+    return nil
   end
   return rows[0][0]
 end
@@ -182,7 +194,11 @@ def get_score(comment_body)
   return score
 end
 
-def set_pr_status(repo, sha, status)
+def set_pr_status(repo, number, sha, status)
+  target_branch = db_get_branch(repo, number)
+  if target_branch != "master"
+    return
+  end
   options = {}
   options[:context] = "crhub"
   options[:description] = "checks code review status"
@@ -196,9 +212,9 @@ end
 def push_status(repo, number, sha)
   score = db_get_status(repo, number)
   if score > 0
-    set_pr_status(repo, sha, "success")
+    set_pr_status(repo, number, sha, "success")
   else
-    set_pr_status(repo, sha, "failure")
+    set_pr_status(repo, number, sha, "failure")
   end
 end
 
@@ -223,7 +239,7 @@ end
 
 def process_pr(pr)
   repo = repo_name_from_pr(pr)
-  set_pr_status(repo, pr['head']['sha'], "pending")
+  set_pr_status(repo, pr['number'], pr['head']['sha'], "pending")
   entry = [pr['number'], pr['id'], pr['title'],
            pr['user']['id'], pr['user']['login']]
   score = 0
@@ -234,6 +250,7 @@ def process_pr(pr)
     entry += [nil, nil]
   end
   entry += [pr['head']['sha']]
+  entry += [pr['base']['ref']] # target branch
   # puts entry.join(", ")
   request_access(repo, pr['number'])
   changed = db_update_pr(repo, *entry)
@@ -245,7 +262,7 @@ def process_pr_comment(repo, issue, comment)
   # necessary?
   request_access(repo, issue['number'])
   sha = db_get_sha(repo, issue['number'])
-  set_pr_status(repo, sha, "pending")
+  set_pr_status(repo, issue['number'], sha, "pending")
   score = get_score(comment['body'])
   if score
     db_add_review(repo, issue['number'], comment["user"]["id"], score)
