@@ -155,8 +155,8 @@ def db_get_status(repo, number)
   repo = sanitize_repo_name(repo)
   repo_reviews = "#{repo}__reviews_"
   query = "select score from #{repo}, #{repo_reviews}
-           where #{repo}.number = #{repo_reviews}.number and #{repo}.assignee_id = #{repo_reviews}.user_id"
-  rows = @db.execute(query)
+           where #{repo}.number = ? and #{repo_reviews}.number = ? and #{repo}.assignee_id = #{repo_reviews}.user_id"
+  rows = @db.execute(query, [number, number])
   if rows.length == 0
     return 0
   end
@@ -191,6 +191,20 @@ def db_get_sha(repo, number)
   rows = @db.execute(query, number)
   raise "Corrupted DB (no sha)" unless rows.length == 1
   return rows[0][0]
+end
+
+def db_get_pr_entry(repo, number)
+  repo = sanitize_repo_name(repo)
+  query = "select * from #{repo} where number = ?"
+  rows = @db.execute(query, number)
+  if rows.length == 0
+    return nil
+  end
+  return rows[0]
+end
+
+def pr_entry_get_sha(entry)
+  return entry[7]
 end
 
 def db_show_prs(repo)
@@ -284,13 +298,20 @@ end
 def process_pr_comment(repo, issue, comment)
   # necessary?
   request_access(repo, issue['number'])
-  sha = db_get_sha(repo, issue['number'])
+  # sha = db_get_sha(repo, issue['number'])
+  db_entry = db_get_pr_entry(repo, issue['number'])
+  if not db_entry
+    puts "No PR matching comment, ignoring"
+    release_access(repo, issue['number'])
+    return
+  end
+  sha = pr_entry_get_sha(db_entry)
   set_pr_status(repo, issue['number'], sha, "pending")
   score = get_score(comment['body'])
   if score
     db_add_review(repo, issue['number'], comment["user"]["id"], score)
-    push_status(repo, issue['number'], sha)
   end
+  push_status(repo, issue['number'], sha)
   release_access(repo, issue['number'])
 end
 
@@ -302,6 +323,8 @@ post '/codereview' do
     action = @payload["action"] 
     case action
     when "opened"
+      process_pull_request_opened(@payload["pull_request"])
+    when "reopened"
       process_pull_request_opened(@payload["pull_request"])
     when "closed"
       process_pull_request_closed(@payload["pull_request"])
@@ -332,6 +355,11 @@ helpers do
   def process_pull_request_opened(pull_request)
     puts "Opened PR #{pull_request['title']}"
     process_pr(pull_request)
+  end
+
+  def process_pull_request_closed(pull_request)
+    puts "Closed PR #{pull_request['title']}"
+    # do nothing for now
   end
 
   def process_pull_request_labeled(pull_request, label)
