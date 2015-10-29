@@ -338,6 +338,8 @@ post '/codereview' do
       process_pull_request_assigned(@payload["pull_request"])
     when "unassigned"
       process_pull_request_unassigned(@payload["pull_request"])
+    when "synchronize"
+      process_pull_request_synchronize(@payload["pull_request"])
     end
   when "status"
     process_status()
@@ -379,6 +381,11 @@ helpers do
 
   def process_pull_request_unassigned(pull_request)
     puts "Unassigned PR #{pull_request['title']}"
+    process_pr(pull_request)
+  end
+
+  def process_pull_request_synchronize(pull_request)
+    puts "Synchronize PR #{pull_request['title']}"
     process_pr(pull_request)
   end
 
