@@ -95,6 +95,7 @@ end
 # Create tables
 $repos.each do |repo|
   repo = sanitize_repo_name(repo)
+  # sha used to be "unique", but 2 PRs can be created with exactly the same diff / sha
   s = "create table if not exists #{repo} (
          number integer primary key,
          id int unique,
@@ -103,7 +104,7 @@ $repos.each do |repo|
          user_login text,
          assignee_id int,
          assignee_login text,
-         sha text unique,
+         sha text,
          target_branch text
        )"
   rows = @db.execute(s)
