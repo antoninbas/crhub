@@ -26,8 +26,9 @@ crhub:
  * sqlite3
 
 You also need to obtain a GitHub [personal token]
-(https://github.com/settings/tokens) with sufficient permissions. Copy this
-token and add it as environment variable `GITHUB_PERSONAL_TOKEN` to your server.
+(https://github.com/settings/tokens) with the correct scope
+(`repo:status` is the only required scope). Copy this token and add it
+as environment variable `GITHUB_PERSONAL_TOKEN` to your server.
 
 ---
 
