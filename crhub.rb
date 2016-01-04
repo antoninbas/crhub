@@ -52,16 +52,22 @@ config = ParseConfig.new(config_file)
 
 class RepoConfig
   attr_reader :with_self_assign
+  attr_reader :users_with_self_assign
   attr_reader :users_bypass
 
   def initialize()
     @with_self_assign = true
+    @users_with_self_assign = Set.new
     @users_bypass = Set.new
   end
 
   def load_config(config)
     if not config["with_self_assign"].nil?
       @with_self_assign = (config["with_self_assign"] == "true")
+    end
+    if not config["users_with_self_assign"].nil?
+      @users_with_self_assign = config["users_with_self_assign"].split()
+      @users_with_self_assign = @users_with_self_assign.to_set
     end
     if not config["users_bypass"].nil?
       @users_bypass = config["users_bypass"].split()
@@ -322,6 +328,7 @@ class CrhubState
   def push_status(repo, number, sha)
     user_login = @the_db.get_user_login(repo, number)
     users_bypass = @repo_configs[repo].users_bypass
+    users_with_self_assign = @repo_configs[repo].users_with_self_assign
     if users_bypass.include?(user_login)
       puts "User #{user_login} is a bypass user for repo #{repo}"
       puts "Status is therefore 'success'"
@@ -329,8 +336,11 @@ class CrhubState
       return
     end
     with_self_assign = @repo_configs[repo].with_self_assign
-    if not with_self_assign and @the_db.is_self_assigned(repo, number)
-      puts "Self-assign is disabled for repo #{repo}, status is 'failure'"
+    if not with_self_assign and
+        not users_with_self_assign.include?(user_login) and
+        @the_db.is_self_assigned(repo, number)
+      puts "Self-assign is disabled for repo #{repo} and user " +
+        "{user_login}, status is 'failure'"
       set_pr_status(repo, number, sha, "failure")
       return
     end
