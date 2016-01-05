@@ -24,6 +24,8 @@ crhub:
  * json
  * octokit
  * sqlite3
+ * parseconfig
+ * daemons (only to run in daemon mode, i.e. when using crhub_daemon.rb)
 
 You also need to obtain a GitHub [personal token]
 (https://github.com/settings/tokens) with the correct scope
@@ -36,11 +38,14 @@ as environment variable `GITHUB_PERSONAL_TOKEN` to your server.
 
 Clone the crhub repo on your server and run it like this:
 
-    repos="<repo1> <repo2> ..." ruby crhub.rb
+    ruby crhub.rb <path to crhub conf file>
 
-For example, to use crhub on the crhub repository:
+For example:
 
-    repos="antoninbas/crhub" ruby crhub.rb
+    ruby crhub.rb crhub.conf
+
+Take a look at the comments in the sample file [crhub.conf]
+(crhub.conf) for more information.
 
 The final step is to add crhub as a webhook for your repository. Use the
 following configuration:
@@ -49,3 +54,16 @@ following configuration:
  * events: `Pull Request` and `Issue Comment`
 
 ---
+
+# Running as a daemon (on Unix)
+
+To run crhub as a daemon, simply use the `crhub_daemon.rb` script
+instead. The following commands are useful:
+
+    ruby crhub_daemon.rb start -- <full path to crhub conf file>
+    ruby crhub_daemon.rb stop
+    ruby crhub_daemon.rb restart -- <full path to crhub conf file>
+    ruby crhub_daemon.rb status
+
+The crhub output will be logged to `crhub_daemon.output` (in the
+script's directory).
