@@ -199,7 +199,9 @@ class CrhubDB
     raise "Corrupted DB" unless row[2] == title
     raise "Corrupted DB" unless row[3] == user_id
     raise "Corrupted DB" unless row[4] == user_login
-    if row[5] != assignee_id
+    # TODO(antonin): is this sanity checking really necessary?
+    # maybe I should jut do an insert_or_replace...
+    if row[5] != assignee_id or row[7] != sha
       query = "replace into #{repo} (number, id, title, user_id, user_login, assignee_id, assignee_login, sha, target_branch)
                values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       @db.execute(query, [number, id, title, user_id, user_login, assignee_id, assignee_login, sha, target_branch])
