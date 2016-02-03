@@ -342,7 +342,7 @@ class CrhubState
         not users_with_self_assign.include?(user_login) and
         @the_db.is_self_assigned(repo, number)
       puts "Self-assign is disabled for repo #{repo} and user " +
-        "{user_login}, status is 'failure'"
+        "#{user_login}, status is 'failure'"
       set_pr_status(repo, number, sha, "failure")
       return
     end
