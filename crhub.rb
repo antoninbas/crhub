@@ -321,7 +321,7 @@ class StyleChecker
       g = Git.clone(uri, repo_path)
       # cannot use a chdir block because of multi-threading
       saved_dir = Dir.getwd
-      Dir.chdir(saved_dir)
+      Dir.chdir(repo_path)
       g.checkout(sha)
       cmd = `#{check_cmd}`
       status = $?.exitstatus
