@@ -316,27 +316,27 @@ class StyleChecker
   def check_uri(uri, repo, sha, check_cmd)
     puts "Cheking style for #{repo} @ #{sha}"
     Dir.mktmpdir do |dir|
-      Dir.chdir(dir) do
-        puts "Cloning repo #{uri}"
-        g = Git.clone(uri, "repo")
+      puts "Cloning repo #{uri}"
+      repo_path = File.join(dir, "repo")
+      g = Git.clone(uri, repo_path)
+      # cannot use a chdir block because of multi-threading
+      saved_dir = Dir.getwd
+      Dir.chdir(saved_dir)
+      g.checkout(sha)
+      cmd = `#{check_cmd}`
+      status = $?.exitstatus
+      Dir.chdir(saved_dir)
 
-        Dir.chdir("repo") do
-          g.checkout(sha)
-          cmd = `#{check_cmd}`
-          status = $?.exitstatus
-
-          if status != 0
-            puts "Style check failed"
-            fname = sanitize_repo_name(repo) + "_" + sha
-            File.open(File.join(Dir.tmpdir(), fname), 'w') do |logf|
-              logf.write(cmd)
-            end
-            return false
-          else
-            puts "Style check is a success"
-            return true
-          end
+      if status != 0
+        puts "Style check failed"
+        fname = sanitize_repo_name(repo) + "_" + sha
+        File.open(File.join(Dir.tmpdir(), fname), 'w') do |logf|
+          logf.write(cmd)
         end
+        return false
+      else
+        puts "Style check is a success"
+        return true
       end
     end
   end
