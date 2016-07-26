@@ -27,6 +27,7 @@ require 'sqlite3'
 require 'thread'
 require 'set'
 require 'parseconfig'
+require 'git'
 
 if not ENV.include?("GITHUB_PERSONAL_TOKEN")
   puts "You need to define the 'GITHUB_PERSONAL_TOKEN' env variable"
@@ -54,11 +55,15 @@ class RepoConfig
   attr_reader :with_self_assign
   attr_reader :users_with_self_assign
   attr_reader :users_bypass
+  attr_reader :checker_cmd
+  attr_reader :access_mode
 
   def initialize()
     @with_self_assign = true
     @users_with_self_assign = Set.new
     @users_bypass = Set.new
+    @checker_cmd = nil
+    @access_mode = nil
   end
 
   def load_config(config)
@@ -72,6 +77,21 @@ class RepoConfig
     if not config["users_bypass"].nil?
       @users_bypass = config["users_bypass"].split()
       @users_bypass = @users_bypass.to_set
+    end
+    if not config["checker_cmd"].nil?
+      @checker_cmd = config["checker_cmd"]
+    end
+    if not config["access_mode"].nil?
+      @access_mode = config["access_mode"]
+      if not Set.new(["https", "ssh"]).include?(@access_mode)
+        puts "'access_mode' needs to be one of 'https', 'ssh'"
+        exit(1)
+      end
+    end
+    if @access_mode.nil? and not @checker_cmd.nil?
+      puts "If you provide a 'checker_cmd' in the conf, you also need to " +
+        "provide an 'access_mode'"
+      exit(1)
     end
   end
 end
@@ -284,12 +304,63 @@ class CrhubDB
   private :sanitize_repo_name, :create_tables, :get_by_attr
 end
 
+
+class StyleChecker
+  def initialize()
+  end
+
+  def sanitize_repo_name(repo)
+    return repo.sub('/', '---').gsub("-", "_")
+  end
+
+  def check_uri(uri, repo, sha, check_cmd)
+    puts "Cheking style for #{repo} @ #{sha}"
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        puts "Cloning repo #{uri}"
+        g = Git.clone(uri, "repo")
+
+        Dir.chdir("repo") do
+          g.checkout(sha)
+          cmd = `#{check_cmd}`
+          status = $?.exitstatus
+
+          if status != 0
+            puts "Style check failed"
+            fname = sanitize_repo_name(repo) + "_" + sha
+            File.open(File.join(Dir.tmpdir(), fname), 'w') do |logf|
+              logf.write(cmd)
+            end
+            return false
+          else
+            puts "Style check is a success"
+            return true
+          end
+        end
+      end
+    end
+  end
+
+  def check(access_mode, repo, sha, check_cmd)
+    if access_mode == "ssh"
+      uri = "git@github.com:#{repo}.git"
+    else
+      uri = "https://github.com/#{repo}.git"
+    end
+    return check_uri(uri, repo, sha, check_cmd)
+  end
+
+  private :check_uri, :sanitize_repo_name
+end
+
+
 class CrhubState
   def initialize(config)
     @config = config
     @repo_configs = config.get_repo_configs()
     @repos = config.get_raw_repo_names()
     @the_db = CrhubDB.new(@repos, config.get_db_path())
+    @style_checker = StyleChecker.new()
 
     @sync = {}
     @repos.each do |repo|
@@ -311,16 +382,27 @@ class CrhubState
     return score
   end
 
-  def set_pr_status(repo, number, sha, status)
+  def set_pr_status(repo, number, sha, status, options)
     target_branch = @the_db.get_branch(repo, number)
     if target_branch != "master"
       return
     end
+    client = Octokit::Client.new(:access_token => $ACCESS_TOKEN)
+    client.create_status(repo, sha, status, options)
+  end
+
+  def set_pr_review_status(repo, number, sha, status)
     options = {}
     options[:context] = "crhub"
     options[:description] = "checks code review status"
-    client = Octokit::Client.new(:access_token => $ACCESS_TOKEN)
-    client.create_status(repo, sha, status, options)
+    set_pr_status(repo, number, sha, status, options)
+  end
+
+  def set_pr_style_status(repo, number, sha, status)
+    options = {}
+    options[:context] = "crhub-clang"
+    options[:description] = "checks code style status with clang-format"
+    set_pr_status(repo, number, sha, status, options)
   end
 
   def repo_name_from_pr(pr)
@@ -334,7 +416,7 @@ class CrhubState
     if users_bypass.include?(user_login)
       puts "User #{user_login} is a bypass user for repo #{repo}"
       puts "Status is therefore 'success'"
-      set_pr_status(repo, number, sha, "success")
+      set_pr_review_status(repo, number, sha, "success")
       return
     end
     with_self_assign = @repo_configs[repo].with_self_assign
@@ -343,14 +425,14 @@ class CrhubState
         @the_db.is_self_assigned(repo, number)
       puts "Self-assign is disabled for repo #{repo} and user " +
         "#{user_login}, status is 'failure'"
-      set_pr_status(repo, number, sha, "failure")
+      set_pr_review_status(repo, number, sha, "failure")
       return
     end
     score = @the_db.get_status(repo, number)
     if score > 0
-      set_pr_status(repo, number, sha, "success")
+      set_pr_review_status(repo, number, sha, "success")
     else
-      set_pr_status(repo, number, sha, "failure")
+      set_pr_review_status(repo, number, sha, "failure")
     end
   end
 
@@ -373,9 +455,27 @@ class CrhubState
     }
   end
 
+  def check_style(repo, number, sha)
+    checker_cmd = @repo_configs[repo].checker_cmd
+    if checker_cmd.nil?
+      return
+    end
+
+    set_pr_style_status(repo, number, sha, "pending")
+
+    access_mode = @repo_configs[repo].access_mode
+    success = @style_checker.check(access_mode, repo, sha, checker_cmd)
+    if success
+      set_pr_style_status(repo, number, sha, "success")
+    else
+      set_pr_style_status(repo, number, sha, "failure")
+    end
+  end
+
   def process_pr(pr)
     repo = repo_name_from_pr(pr)
-    set_pr_status(repo, pr['number'], pr['head']['sha'], "pending")
+    set_pr_review_status(repo, pr['number'], pr['head']['sha'], "pending")
+    check_style(repo, pr['number'], pr['head']['sha'])
     entry = [pr['number'], pr['id'], pr['title'],
              pr['user']['id'], pr['user']['login']]
     score = 0
@@ -404,7 +504,7 @@ class CrhubState
       return
     end
     sha = CrhubDB.pr_entry_get_sha(db_entry)
-    set_pr_status(repo, issue['number'], sha, "pending")
+    set_pr_review_status(repo, issue['number'], sha, "pending")
     score = get_score(comment['body'])
     if score
       @the_db.add_review(repo, issue['number'], comment["user"]["id"], score)

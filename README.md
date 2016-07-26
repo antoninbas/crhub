@@ -25,6 +25,7 @@ crhub:
  * octokit
  * sqlite3
  * parseconfig
+ * git
  * daemons (only to run in daemon mode, i.e. when using crhub_daemon.rb)
 
 You also need to obtain a GitHub [personal token]
