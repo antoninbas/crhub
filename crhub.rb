@@ -314,31 +314,40 @@ class StyleChecker
   end
 
   def check_uri(uri, repo, sha, check_cmd)
-    puts "Cheking style for #{repo} @ #{sha}"
-    Dir.mktmpdir do |dir|
-      puts "Cloning repo #{uri}"
-      repo_path = File.join(dir, "repo")
-      g = Git.clone(uri, repo_path)
-      # cannot use a chdir block because of multi-threading
-      saved_dir = Dir.getwd
-      Dir.chdir(repo_path)
-      g.checkout(sha)
-      cmd = `#{check_cmd}`
-      status = $?.exitstatus
-      Dir.chdir(saved_dir)
+    # creating a new process
+    puts "Spawning child process"
+    pid = Process.fork do
+      puts "Cheking style for #{repo} @ #{sha}"
 
-      if status != 0
-        puts "Style check failed"
-        fname = sanitize_repo_name(repo) + "_" + sha
-        File.open(File.join(Dir.tmpdir(), fname), 'w') do |logf|
-          logf.write(cmd)
+      Dir.mktmpdir do |dir|
+        repo_path = File.join(dir, "repo")
+        puts "Cloning repo #{uri} under #{repo_path}"
+        g = Git.clone(uri, repo_path)
+        Dir.chdir(repo_path) do
+          g.checkout(sha)
+          cmd = `#{check_cmd}`
+          status = $?.exitstatus
+
+          if status != 0
+            fname = sanitize_repo_name(repo) + "_" + sha
+            puts "Status check failed, writing log to #{fname}"
+            File.open(File.join(Dir.tmpdir(), fname), 'w') do |logf|
+              logf.write(cmd)
+            end
+          else
+            puts "Style check is a success"
+          end
+
+          exit $?.exitstatus
         end
-        return false
-      else
-        puts "Style check is a success"
-        return true
       end
-    end
+    end  # end of child process code
+
+    Process.wait
+    status = $?.exitstatus
+
+    puts "Child process returned status #{status}"
+    return (status == 0)
   end
 
   def check(access_mode, repo, sha, check_cmd)
