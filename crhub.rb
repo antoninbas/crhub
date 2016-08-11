@@ -470,8 +470,6 @@ class CrhubState
       return
     end
 
-    set_pr_style_status(repo, number, sha, "pending")
-
     access_mode = @repo_configs[repo].access_mode
     success = @style_checker.check(access_mode, repo, sha, checker_cmd)
     if success
@@ -484,7 +482,7 @@ class CrhubState
   def process_pr(pr)
     repo = repo_name_from_pr(pr)
     set_pr_review_status(repo, pr['number'], pr['head']['sha'], "pending")
-    check_style(repo, pr['number'], pr['head']['sha'])
+    set_pr_style_status(repo, pr['number'], pr['head']['sha'], "pending")
     entry = [pr['number'], pr['id'], pr['title'],
              pr['user']['id'], pr['user']['login']]
     score = 0
@@ -501,6 +499,7 @@ class CrhubState
     changed = @the_db.update_pr(repo, *entry)
     push_status(repo, pr['number'], pr['head']['sha'])
     release_access(repo, pr['number'])
+    check_style(repo, pr['number'], pr['head']['sha'])
   end
 
   def process_pr_comment(repo, issue, comment)
