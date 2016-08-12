@@ -408,10 +408,12 @@ class CrhubState
   end
 
   def set_pr_style_status(repo, number, sha, status)
+    puts "Setting style status to '#{status}'"
     options = {}
     options[:context] = "crhub-clang"
     options[:description] = "checks code style status with clang-format"
     set_pr_status(repo, number, sha, status, options)
+    puts "Style status set"
   end
 
   def repo_name_from_pr(pr)
@@ -464,13 +466,18 @@ class CrhubState
     }
   end
 
-  def check_style(repo, number, sha)
+  def has_style_check(repo)
     checker_cmd = @repo_configs[repo].checker_cmd
-    if checker_cmd.nil?
+    return !checker_cmd.nil?
+  end
+
+  def check_style(repo, number, sha)
+    if not has_style_check(repo)
       return
     end
 
     access_mode = @repo_configs[repo].access_mode
+    checker_cmd = @repo_configs[repo].checker_cmd
     success = @style_checker.check(access_mode, repo, sha, checker_cmd)
     if success
       set_pr_style_status(repo, number, sha, "success")
@@ -482,7 +489,9 @@ class CrhubState
   def process_pr(pr)
     repo = repo_name_from_pr(pr)
     set_pr_review_status(repo, pr['number'], pr['head']['sha'], "pending")
-    set_pr_style_status(repo, pr['number'], pr['head']['sha'], "pending")
+    if has_style_check(repo)
+      set_pr_style_status(repo, pr['number'], pr['head']['sha'], "pending")
+    end
     entry = [pr['number'], pr['id'], pr['title'],
              pr['user']['id'], pr['user']['login']]
     score = 0
@@ -500,6 +509,7 @@ class CrhubState
     push_status(repo, pr['number'], pr['head']['sha'])
     release_access(repo, pr['number'])
     check_style(repo, pr['number'], pr['head']['sha'])
+    puts "PR has been processed"
   end
 
   def process_pr_comment(repo, issue, comment)
